@@ -35,7 +35,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define LEDS_COUNT 3
+#define BUFFER_ARRAY_SIZE 32
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,7 +51,7 @@ UART_HandleTypeDef huart3;
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* USER CODE BEGIN PV */
-
+extern struct netif gnetif;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -65,24 +66,45 @@ static void MX_USB_OTG_FS_PCD_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-err_t udp_send_message(struct udp_pcb *upcb, const ip_addr_t *addr, u16_t port,
-		const char *dataSource) {
+struct GPIO_Attr {
+	GPIO_TypeDef *gpio;
+	uint16_t pin;
+};
+
+//typedef struct {
+//	char *response;
+//	char *command;
+//	char *data;
+//} request_struct_sm;
+//size_t serialize(const request_struct_sm *arch_sm, char *buf) {
+//	size_t bytes = 0;
+//	memcpy(buf + bytes, arch_sm->response, strlen(arch_sm->response) + 1);
+//	bytes += strlen(arch_sm->response) + 1;
+//	memcpy(buf + bytes, arch_sm->command, strlen(arch_sm->command) + 1);
+//	bytes += strlen(arch_sm->command) + 1;
+//	memcpy(buf + bytes, arch_sm->data, strlen(arch_sm->data) + 1);
+//	bytes += strlen(arch_sm->data) + 1;
+//	return bytes;
+//}
+//
+//void deserialize(const char *buf, request_struct_sm *arch_sm) {
+//	size_t offset = 0;
+//	arch_sm->response = strdup(buf + offset);
+//	offset += strlen(buf + offset) + 1;
+//	arch_sm->command = strdup(buf + offset);
+//	offset += strlen(buf + offset) + 1;
+//	arch_sm->data = strdup(buf + offset);
+//}
+
+err_t udp_send_message(struct udp_pcb *upcb, const ip_addr_t *addr, u16_t port, const char *dataSource) {
 	// если сокет не создался, то на выход с ошибкой
 	if (upcb == NULL) {
 		return ERR_ABRT;
 	}
-	u16_t dataLength = strlen(dataSource) + 1;
+	u16_t dataLength = strlen(dataSource);
 	// аллоцируем память под буфер с данными
 	struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, dataLength, PBUF_RAM);
 	if (p != NULL) {
-		//char data[5] = "Test";
-		//аллокация под сообщение для передачи
-		//char* data=strdup(dataSource);
-//		char *data =  malloc(dataLength);
-//		if (data == NULL) {
-//			return ERR_ABRT;
-//		}
-//		strncpy(data, dataSource, dataLength);
 		// кладём данные в аллоцированный буфер
 		err_t err = pbuf_take(p, dataSource, dataLength);
 		//очистить память от сообщения
@@ -105,42 +127,54 @@ err_t udp_send_message(struct udp_pcb *upcb, const ip_addr_t *addr, u16_t port,
 	return ERR_OK;
 }
 
-void udp_receive_message(void *arg, struct udp_pcb *pcb, struct pbuf *p,
-		const ip_addr_t *addr, u16_t port) {
+void get_ifconfig(char *answer) {
+	char local_ip[BUFFER_ARRAY_SIZE];
+	char subnet_mask[BUFFER_ARRAY_SIZE];
+	char gateway[BUFFER_ARRAY_SIZE];
+
+	ip4addr_ntoa_r(netif_ip4_addr(&gnetif), local_ip, BUFFER_ARRAY_SIZE);
+	ip4addr_ntoa_r(netif_ip4_netmask(&gnetif), subnet_mask, BUFFER_ARRAY_SIZE);
+	ip4addr_ntoa_r(netif_ip4_gw(&gnetif), gateway, BUFFER_ARRAY_SIZE);
+	sprintf(answer, "\n%s %s\n%s %s\n%s %s", "ip address: ", local_ip, "subnet mask:", subnet_mask, "gateway:    ",
+			gateway);
+}
+
+void sed_leds(char *answer, char *received_message) {
+	char led_answer[BUFFER_ARRAY_SIZE] = "leds { ";
+	char led[LEDS_COUNT];
+	struct GPIO_Attr gpio_outputs[] = { { GPIOB, GPIO_PIN_0 }, { GPIOB,
+	GPIO_PIN_7 }, { GPIOB, GPIO_PIN_14 } };
+	for (uint16_t i = 0; i < sizeof(gpio_outputs) / sizeof(gpio_outputs[0]); i++) {
+		uint16_t led_command = received_message[i] - '0';
+		if (led_command != 2 && led_command != HAL_GPIO_ReadPin(gpio_outputs[i].gpio, gpio_outputs[i].pin)) {
+			HAL_GPIO_WritePin(gpio_outputs[i].gpio, gpio_outputs[i].pin, led_command);
+			sprintf(led, "%d ", i + 1);
+			strcat(led_answer, led);
+		}
+	}
+	strcat(led_answer, "} switched");
+	strcpy(answer, led_answer);
+}
+
+void udp_receive_message(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
 	if (p != NULL) {
 		/* send received packet back to sender */
-		char received_message[64];
+		char received_message[BUFFER_ARRAY_SIZE];
 		strncpy(received_message, p->payload, p->len);
 		received_message[p->len] = '\0';
 		pbuf_free(p);
 
-//		u16_t buffer_for_system_info_size = 64;
-//		char buffer_for_system_info[buffer_for_system_info_size];
-		char answer[128];
-		if (strcmp(received_message, "test") == 0) {
+		char answer[1024];
+		if (strcmp(received_message, "echo") == 0) {
 			strcpy(answer, received_message);
-		} else if (strcmp(received_message, "ip") == 0) {
-			char answerIP[] = "ip address: ";
-			char Ip4Adr[32];
-
-			char *ip_client = ipaddr_ntoa_r(addr, Ip4Adr, 32);
-			if (ip_client == NULL) {
-				return;
-			}
-
-//			const ip_addr_t *remote_ip = addr;
-//			sprintf(Ip4Adr, "%lu.%lu.%lu.%lu", remote_ip->addr & 0xff,
-//					(remote_ip->addr >> 8) & 0xff,
-//					(remote_ip->addr >> 16) & 0xff, remote_ip->addr >> 24);
-
-			strcat(answerIP, Ip4Adr);
-			strcpy(answer, answerIP);
+		} else if (strcmp(received_message, "ifconfig") == 0) {
+			get_ifconfig(answer);
+		} else if (strncmp(received_message + LEDS_COUNT, "leds", 4) == 0) {
+			sed_leds(answer, received_message);
 		} else {
-			strcpy(answer, "Unknown message");
+			strcpy(answer, "Unknown command");
 		}
 		udp_send_message(pcb, addr, port, answer);
-		HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
-
 	}
 }
 
@@ -253,8 +287,7 @@ void SystemClock_Config(void) {
 
 	/** Initializes the CPU, AHB and APB buses clocks
 	 */
-	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-			| RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
 	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
 	RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
 	RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
@@ -353,8 +386,7 @@ static void MX_GPIO_Init(void) {
 	HAL_GPIO_WritePin(GPIOB, LD1_Pin | LD3_Pin | LD2_Pin, GPIO_PIN_RESET);
 
 	/*Configure GPIO pin Output Level */
-	HAL_GPIO_WritePin(USB_PowerSwitchOn_GPIO_Port, USB_PowerSwitchOn_Pin,
-			GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(USB_PowerSwitchOn_GPIO_Port, USB_PowerSwitchOn_Pin, GPIO_PIN_RESET);
 
 	/*Configure GPIO pin : USER_Btn_Pin */
 	GPIO_InitStruct.Pin = USER_Btn_Pin;
